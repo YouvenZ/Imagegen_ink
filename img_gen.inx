@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<inkscape-extension xmlns="http://www.inkscape.org/namespace/inkscape/extension">
+    <name>AI Image Generator</name>
+    <id>org.inkscape.ai.image.generator</id>
+    
+    <param name="tab" type="notebook">
+        <page name="mode" gui-text="Mode">
+            <param name="operation_mode" type="optiongroup" appearance="combo" gui-text="Operation mode:">
+                <option value="generate">Generate new image</option>
+                <option value="edit">Edit selected image</option>
+                <option value="variation">Create variation of selected image</option>
+            </param>
+            <spacer/>
+            <label>Generate: Create new image from text description</label>
+            <label>Edit: Modify selected image based on instructions</label>
+            <label>Variation: Create a variation of selected image</label>
+            <spacer/>
+            <label>Note: Requires OpenAI API key with DALL-E access</label>
+        </page>
+        
+        <page name="prompt" gui-text="Prompt">
+            <param name="api_key" type="string" gui-text="OpenAI API Key:">sk-...</param>
+            <label>Get your API key from: https://platform.openai.com</label>
+            <spacer/>
+            <param name="prompt" type="string" gui-text="Image description:">A beautiful sunset over mountains</param>
+            <label>Describe what you want to see in the image</label>
+            <spacer/>
+            <param name="edit_instruction" type="string" gui-text="Edit instruction (for Edit mode):">Add a rainbow in the sky</param>
+            <label>Only used when editing an existing image</label>
+        </page>
+        
+        <page name="settings" gui-text="Settings">
+            <param name="model" type="optiongroup" appearance="combo" gui-text="Model:">
+                <option value="dall-e-3">DALL-E 3 (Best quality)</option>
+                <option value="dall-e-2">DALL-E 2 (Faster, cheaper)</option>
+            </param>
+            
+            <spacer/>
+            
+            <param name="image_size" type="optiongroup" appearance="combo" gui-text="Image size:">
+                <option value="1024x1024">Square (1024x1024)</option>
+                <option value="1792x1024">Landscape (1792x1024) - DALL-E 3 only</option>
+                <option value="1024x1792">Portrait (1024x1792) - DALL-E 3 only</option>
+                <option value="512x512">Small (512x512) - DALL-E 2 only</option>
+                <option value="256x256">Tiny (256x256) - DALL-E 2 only</option>
+            </param>
+            
+            <spacer/>
+            
+            <param name="quality" type="optiongroup" appearance="combo" gui-text="Quality (DALL-E 3 only):">
+                <option value="standard">Standard</option>
+                <option value="hd">HD (Higher quality, more expensive)</option>
+            </param>
+            
+            <spacer/>
+            
+            <param name="style" type="optiongroup" appearance="combo" gui-text="Style (DALL-E 3 only):">
+                <option value="vivid">Vivid (Hyper-real, dramatic)</option>
+                <option value="natural">Natural (More natural, less dramatic)</option>
+            </param>
+        </page>
+        
+        <page name="save" gui-text="Save Options">
+            <param name="save_to_disk" type="bool" gui-text="Save image to disk">true</param>
+            <label>Save a copy of the generated image to your computer</label>
+            <spacer/>
+            
+            <param name="save_directory" type="string" gui-text="Save directory:">C:\Users\youve\Pictures\AI_Images</param>
+            <label>Directory where images will be saved</label>
+            <spacer/>
+            
+            <param name="filename_prefix" type="string" gui-text="Filename prefix:">ai_image</param>
+            <label>Prefix for saved image filenames</label>
+            <spacer/>
+            
+            <param name="embed_in_svg" type="bool" gui-text="Embed image in SVG">true</param>
+            <label>Embed image data in SVG file (larger file size)</label>
+            <label>If unchecked, links to external file (smaller SVG)</label>
+        </page>
+        
+        <page name="placement" gui-text="Placement">
+            <param name="position_mode" type="optiongroup" appearance="combo" gui-text="Position:">
+                <option value="center">Center of canvas</option>
+                <option value="cursor">At cursor/selected object</option>
+                <option value="top_left">Top left</option>
+                <option value="top_center">Top center</option>
+                <option value="top_right">Top right</option>
+                <option value="bottom_left">Bottom left</option>
+                <option value="bottom_center">Bottom center</option>
+                <option value="bottom_right">Bottom right</option>
+            </param>
+            
+            <spacer/>
+            
+            <param name="scale_mode" type="optiongroup" appearance="combo" gui-text="Scale mode:">
+                <option value="original">Original size</option>
+                <option value="fit_width">Fit to canvas width</option>
+                <option value="fit_height">Fit to canvas height</option>
+                <option value="fit_canvas">Fit to canvas (keep aspect ratio)</option>
+                <option value="custom">Custom size</option>
+            </param>
+            
+            <param name="custom_width" type="int" min="50" max="5000" gui-text="Custom width (px):">800</param>
+            <param name="custom_height" type="int" min="50" max="5000" gui-text="Custom height (px):">600</param>
+            <label>Only used when scale mode is Custom</label>
+        </page>
+        
+        <page name="help" gui-text="Help">
+            <label>How to use:</label>
+            <label>1. Get an OpenAI API key with DALL-E access</label>
+            <label>2. Select Generate or Edit mode</label>
+            <label>3. Enter your description or edit instruction</label>
+            <label>4. Configure size and quality settings</label>
+            <label>5. Click Apply</label>
+            <spacer/>
+            <label>For Generate mode:</label>
+            <label>- Describe the image you want in detail</label>
+            <label>- Be specific about style, colors, mood</label>
+            <spacer/>
+            <label>For Edit mode:</label>
+            <label>- Select an image in Inkscape first</label>
+            <label>- Describe what changes you want</label>
+            <label>- The image must be embedded or accessible</label>
+            <spacer/>
+            <label>For Variation mode:</label>
+            <label>- Select an image in Inkscape</label>
+            <label>- Creates a similar but different version</label>
+            <spacer/>
+            <label>Tips:</label>
+            <label>- DALL-E 3 produces higher quality images</label>
+            <label>- HD quality costs more but looks better</label>
+            <label>- Be detailed in your descriptions</label>
+            <label>- Images are saved with timestamp</label>
+            <spacer/>
+            <label>Note: API usage costs apply based on OpenAI pricing</label>
+        </page>
+    </param>
+    
+    <effect>
+        <object-type>all</object-type>
+        <effects-menu>
+            <submenu name="Generate"/>
+        </effects-menu>
+    </effect>
+    
+    <script>
+        <command location="inx" interpreter="python">img_gen.py</command>
+    </script>
+</inkscape-extension>
