@@ -1,87 +1,197 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- filepath: c:\Users\youve\AppData\Roaming\inkscape\extensions\image_maker\img_gen.inx -->
 <inkscape-extension xmlns="http://www.inkscape.org/namespace/inkscape/extension">
     <name>AI Image Generator</name>
     <id>org.inkscape.ai.image.generator</id>
     
     <param name="tab" type="notebook">
+        <!-- Mode Tab -->
         <page name="mode" gui-text="Mode">
             <param name="operation_mode" type="optiongroup" appearance="combo" gui-text="Operation mode:">
                 <option value="generate">Generate new image</option>
-                <option value="edit">Edit selected image</option>
+                <option value="edit">Edit selected image (inpainting)</option>
                 <option value="variation">Create variation of selected image</option>
+                <option value="img2img">Image-to-image transformation</option>
             </param>
             <spacer/>
-            <label>Generate: Create new image from text description</label>
-            <label>Edit: Modify selected image based on instructions</label>
-            <label>Variation: Create a variation of selected image</label>
-            <spacer/>
-            <label>Note: Requires OpenAI API key with DALL-E access</label>
+            <label appearance="header">Mode descriptions:</label>
+            <label>• Generate: Create new image from text description</label>
+            <label>• Edit: Modify parts of selected image (inpainting)</label>
+            <label>• Variation: Create similar but different version</label>
+            <label>• Img2Img: Transform image guided by prompt</label>
         </page>
         
+        <!-- Provider Tab -->
+        <page name="provider" gui-text="Provider">
+            <param name="provider" type="optiongroup" appearance="combo" gui-text="AI Provider:">
+                <option value="openai">OpenAI DALL-E</option>
+                <option value="stability">Stability AI (Stable Diffusion)</option>
+                <option value="replicate">Replicate (SDXL, Flux)</option>
+                <option value="local">Local (Automatic1111/ComfyUI)</option>
+            </param>
+            <spacer/>
+            
+            <label appearance="header">API Configuration:</label>
+            <param name="api_key" type="string" gui-text="API Key:">sk-...</param>
+            <param name="use_env_key" type="bool" gui-text="Use environment variable instead">false</param>
+            <label>Environment variables: OPENAI_API_KEY, STABILITY_API_KEY, REPLICATE_API_TOKEN</label>
+            <spacer/>
+            
+            <param name="api_endpoint" type="string" gui-text="Custom endpoint (Local only):">http://127.0.0.1:7860/sdapi/v1/txt2img</param>
+            <spacer/>
+            
+            <label appearance="header">Proxy Settings:</label>
+            <param name="use_proxy" type="bool" gui-text="Use proxy">false</param>
+            <param name="proxy_url" type="string" gui-text="Proxy URL:">http://proxy:8080</param>
+        </page>
+        
+        <!-- Prompt Tab -->
         <page name="prompt" gui-text="Prompt">
-            <param name="api_key" type="string" gui-text="OpenAI API Key:">sk-...</param>
-            <label>Get your API key from: https://platform.openai.com</label>
+            <label appearance="header">Image Description:</label>
+            <param name="prompt" type="string" appearance="multiline" gui-text="Prompt:">A beautiful sunset over mountains with dramatic clouds</param>
             <spacer/>
-            <param name="prompt" type="string" gui-text="Image description:">A beautiful sunset over mountains</param>
-            <label>Describe what you want to see in the image</label>
+            
+            <label appearance="header">Negative Prompt (what to avoid):</label>
+            <param name="negative_prompt" type="string" appearance="multiline" gui-text="Negative prompt:">blurry, low quality, distorted, watermark</param>
+            <label>Supported by: Stability AI, Replicate, Local</label>
             <spacer/>
-            <param name="edit_instruction" type="string" gui-text="Edit instruction (for Edit mode):">Add a rainbow in the sky</param>
-            <label>Only used when editing an existing image</label>
+            
+            <label appearance="header">Edit Instruction (for Edit mode):</label>
+            <param name="edit_instruction" type="string" appearance="multiline" gui-text="Edit instruction:">Add a rainbow in the sky</param>
+            <spacer/>
+            
+            <label appearance="header">Quick Presets:</label>
+            <param name="preset" type="optiongroup" appearance="combo" gui-text="Apply preset:">
+                <option value="">None (use custom settings)</option>
+                <option value="photorealistic">Photorealistic</option>
+                <option value="artistic">Artistic</option>
+                <option value="quick_draft">Quick Draft</option>
+                <option value="high_quality">High Quality</option>
+            </param>
         </page>
         
-        <page name="settings" gui-text="Settings">
+        <!-- Model Settings Tab -->
+        <page name="settings" gui-text="Model">
+            <label appearance="header">OpenAI Models:</label>
             <param name="model" type="optiongroup" appearance="combo" gui-text="Model:">
                 <option value="dall-e-3">DALL-E 3 (Best quality)</option>
-                <option value="dall-e-2">DALL-E 2 (Faster, cheaper)</option>
+                <option value="dall-e-2">DALL-E 2 (Faster, edits/variations)</option>
+                <option value="gpt-image-1">GPT Image 1</option>
+                <option value="stable-diffusion-xl-1024-v1-0">SDXL 1.0 (Stability)</option>
+                <option value="stable-diffusion-v1-6">SD 1.6 (Stability)</option>
+                <option value="stability-ai/sdxl">SDXL (Replicate)</option>
+                <option value="black-forest-labs/flux-schnell">Flux Schnell (Replicate)</option>
+                <option value="black-forest-labs/flux-pro">Flux Pro (Replicate)</option>
+                <option value="default">Default (Local)</option>
             </param>
-            
             <spacer/>
             
-            <param name="image_size" type="optiongroup" appearance="combo" gui-text="Image size:">
+            <label appearance="header">Image Size:</label>
+            <param name="image_size" type="optiongroup" appearance="combo" gui-text="Size:">
                 <option value="1024x1024">Square (1024x1024)</option>
-                <option value="1792x1024">Landscape (1792x1024) - DALL-E 3 only</option>
-                <option value="1024x1792">Portrait (1024x1792) - DALL-E 3 only</option>
-                <option value="512x512">Small (512x512) - DALL-E 2 only</option>
-                <option value="256x256">Tiny (256x256) - DALL-E 2 only</option>
+                <option value="1792x1024">Landscape (1792x1024)</option>
+                <option value="1024x1792">Portrait (1024x1792)</option>
+                <option value="1152x896">Wide (1152x896)</option>
+                <option value="896x1152">Tall (896x1152)</option>
+                <option value="768x768">Medium (768x768)</option>
+                <option value="512x512">Small (512x512)</option>
+                <option value="256x256">Tiny (256x256)</option>
             </param>
             
+            <param name="use_custom_size" type="bool" gui-text="Use custom size instead">false</param>
+            <param name="custom_width" type="int" min="256" max="2048" gui-text="Custom width:">1024</param>
+            <param name="custom_height" type="int" min="256" max="2048" gui-text="Custom height:">1024</param>
             <spacer/>
             
-            <param name="quality" type="optiongroup" appearance="combo" gui-text="Quality (DALL-E 3 only):">
+            <label appearance="header">Quality (DALL-E 3):</label>
+            <param name="quality" type="optiongroup" appearance="combo" gui-text="Quality:">
                 <option value="standard">Standard</option>
-                <option value="hd">HD (Higher quality, more expensive)</option>
+                <option value="hd">HD (Higher detail)</option>
             </param>
             
-            <spacer/>
-            
-            <param name="style" type="optiongroup" appearance="combo" gui-text="Style (DALL-E 3 only):">
-                <option value="vivid">Vivid (Hyper-real, dramatic)</option>
-                <option value="natural">Natural (More natural, less dramatic)</option>
+            <param name="style" type="optiongroup" appearance="combo" gui-text="Style:">
+                <option value="vivid">Vivid (Dramatic)</option>
+                <option value="natural">Natural (Realistic)</option>
             </param>
         </page>
         
-        <page name="save" gui-text="Save Options">
-            <param name="save_to_disk" type="bool" gui-text="Save image to disk">true</param>
-            <label>Save a copy of the generated image to your computer</label>
+        <!-- Advanced Tab -->
+        <page name="advanced" gui-text="Advanced">
+            <label appearance="header">Generation Parameters:</label>
+            <param name="seed" type="int" min="-1" max="2147483647" gui-text="Seed (-1 for random):">-1</param>
+            <label>Use same seed to reproduce results</label>
             <spacer/>
+            
+            <param name="batch_count" type="int" min="1" max="4" gui-text="Batch count (1-4):">1</param>
+            <label>Generate multiple images at once</label>
+            <spacer/>
+            
+            <label appearance="header">Stable Diffusion Parameters:</label>
+            <param name="cfg_scale" type="float" min="1.0" max="20.0" precision="1" gui-text="CFG Scale:">7.0</param>
+            <label>How closely to follow the prompt (7-12 typical)</label>
+            
+            <param name="steps" type="int" min="10" max="100" gui-text="Sampling steps:">30</param>
+            <label>More steps = better quality but slower</label>
+            <spacer/>
+            
+            <label appearance="header">Image-to-Image:</label>
+            <param name="img2img_strength" type="float" min="0.0" max="1.0" precision="2" gui-text="Transformation strength:">0.75</param>
+            <label>0 = keep original, 1 = complete transformation</label>
+            <spacer/>
+            
+            <label appearance="header">History:</label>
+            <param name="save_history" type="bool" gui-text="Save generation history">true</param>
+            <label>Saves prompts and settings to ~/.inkscape_ai_image_history.json</label>
+        </page>
+        
+        <!-- Mask/Edit Tab -->
+        <page name="mask" gui-text="Mask/Edit">
+            <label appearance="header">Mask Mode (for Edit operation):</label>
+            <param name="mask_mode" type="optiongroup" appearance="combo" gui-text="Mask region:">
+                <option value="full">Full image (regenerate all)</option>
+                <option value="center">Center region only</option>
+                <option value="edges">Edges only (keep center)</option>
+                <option value="top_half">Top half</option>
+                <option value="bottom_half">Bottom half</option>
+                <option value="left_half">Left half</option>
+                <option value="right_half">Right half</option>
+            </param>
+            <spacer/>
+            
+            <param name="use_selection_as_mask" type="bool" gui-text="Use selected shapes as mask">false</param>
+            <label>Select shapes along with the image to define edit region</label>
+            <spacer/>
+            
+            <label appearance="header">Mask Refinement:</label>
+            <param name="mask_feather" type="int" min="0" max="50" gui-text="Feather radius (px):">0</param>
+            <label>Blur mask edges for smoother blending</label>
+            
+            <param name="mask_opacity" type="float" min="0.0" max="1.0" precision="2" gui-text="Mask opacity:">0.5</param>
+        </page>
+        
+        <!-- Save Options Tab -->
+        <page name="save" gui-text="Save">
+            <label appearance="header">Save to Disk:</label>
+            <param name="save_to_disk" type="bool" gui-text="Save image to disk">true</param>
             
             <param name="save_directory" type="string" gui-text="Save directory:">C:\Users\youve\Pictures\AI_Images</param>
-            <label>Directory where images will be saved</label>
-            <spacer/>
             
             <param name="filename_prefix" type="string" gui-text="Filename prefix:">ai_image</param>
-            <label>Prefix for saved image filenames</label>
+            <label>Files saved as: prefix_timestamp_seed.png</label>
             <spacer/>
             
+            <label appearance="header">SVG Embedding:</label>
             <param name="embed_in_svg" type="bool" gui-text="Embed image in SVG">true</param>
-            <label>Embed image data in SVG file (larger file size)</label>
-            <label>If unchecked, links to external file (smaller SVG)</label>
+            <label>✓ Embedded: Self-contained but larger file</label>
+            <label>✗ Linked: Smaller file but needs external image</label>
         </page>
         
+        <!-- Placement Tab -->
         <page name="placement" gui-text="Placement">
+            <label appearance="header">Position:</label>
             <param name="position_mode" type="optiongroup" appearance="combo" gui-text="Position:">
                 <option value="center">Center of canvas</option>
-                <option value="cursor">At cursor/selected object</option>
+                <option value="cursor">At selected object</option>
                 <option value="top_left">Top left</option>
                 <option value="top_center">Top center</option>
                 <option value="top_right">Top right</option>
@@ -89,50 +199,57 @@
                 <option value="bottom_center">Bottom center</option>
                 <option value="bottom_right">Bottom right</option>
             </param>
-            
             <spacer/>
             
+            <label appearance="header">Scale:</label>
             <param name="scale_mode" type="optiongroup" appearance="combo" gui-text="Scale mode:">
                 <option value="original">Original size</option>
                 <option value="fit_width">Fit to canvas width</option>
                 <option value="fit_height">Fit to canvas height</option>
-                <option value="fit_canvas">Fit to canvas (keep aspect ratio)</option>
+                <option value="fit_canvas">Fit to canvas (keep ratio)</option>
                 <option value="custom">Custom size</option>
             </param>
             
-            <param name="custom_width" type="int" min="50" max="5000" gui-text="Custom width (px):">800</param>
-            <param name="custom_height" type="int" min="50" max="5000" gui-text="Custom height (px):">600</param>
-            <label>Only used when scale mode is Custom</label>
+            <param name="placement_width" type="int" min="50" max="5000" gui-text="Custom width (px):">800</param>
+            <param name="placement_height" type="int" min="50" max="5000" gui-text="Custom height (px):">600</param>
         </page>
         
+        <!-- Help Tab -->
         <page name="help" gui-text="Help">
-            <label>How to use:</label>
-            <label>1. Get an OpenAI API key with DALL-E access</label>
-            <label>2. Select Generate or Edit mode</label>
-            <label>3. Enter your description or edit instruction</label>
-            <label>4. Configure size and quality settings</label>
+            <label appearance="header">Quick Start:</label>
+            <label>1. Select a provider and enter API key</label>
+            <label>2. Choose operation mode (Generate/Edit/etc.)</label>
+            <label>3. Write your prompt</label>
+            <label>4. Configure size and quality</label>
             <label>5. Click Apply</label>
             <spacer/>
-            <label>For Generate mode:</label>
-            <label>- Describe the image you want in detail</label>
-            <label>- Be specific about style, colors, mood</label>
+            
+            <label appearance="header">Provider Comparison:</label>
+            <label>• OpenAI: Best for general use, easy setup</label>
+            <label>• Stability: Great quality, negative prompts</label>
+            <label>• Replicate: Access to Flux, SDXL models</label>
+            <label>• Local: Free, private, needs local setup</label>
             <spacer/>
-            <label>For Edit mode:</label>
-            <label>- Select an image in Inkscape first</label>
-            <label>- Describe what changes you want</label>
-            <label>- The image must be embedded or accessible</label>
+            
+            <label appearance="header">Tips:</label>
+            <label>• Use negative prompts to avoid unwanted elements</label>
+            <label>• Set a seed to reproduce exact results</label>
+            <label>• Higher CFG = closer to prompt</label>
+            <label>• More steps = better quality (diminishing returns)</label>
             <spacer/>
-            <label>For Variation mode:</label>
-            <label>- Select an image in Inkscape</label>
-            <label>- Creates a similar but different version</label>
+            
+            <label appearance="header">Environment Variables:</label>
+            <label>OPENAI_API_KEY - OpenAI API key</label>
+            <label>STABILITY_API_KEY - Stability AI key</label>
+            <label>REPLICATE_API_TOKEN - Replicate token</label>
             <spacer/>
-            <label>Tips:</label>
-            <label>- DALL-E 3 produces higher quality images</label>
-            <label>- HD quality costs more but looks better</label>
-            <label>- Be detailed in your descriptions</label>
-            <label>- Images are saved with timestamp</label>
-            <spacer/>
-            <label>Note: API usage costs apply based on OpenAI pricing</label>
+            
+            <label appearance="header">Pricing (approximate):</label>
+            <label>• DALL-E 3 Standard: $0.04/image</label>
+            <label>• DALL-E 3 HD: $0.08/image</label>
+            <label>• DALL-E 2: $0.02/image</label>
+            <label>• Stability/Replicate: varies by model</label>
+            <label>• Local: Free (your hardware)</label>
         </page>
     </param>
     

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Inkscape extension to generate and edit images using OpenAI DALL-E API.
+Inkscape extension to generate and edit images using AI providers.
+Supports OpenAI DALL-E, Stability AI, Replicate, and local models.
 """
 
 import inkex
@@ -12,25 +13,151 @@ import ssl
 import base64
 import os
 import tempfile
+import hashlib
+import time
+import certifi
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 
 
 class AIImageGenerator(inkex.EffectExtension):
     """Extension to generate and edit images using AI."""
     
+    # Configuration file paths
+    CONFIG_FILENAME = '.config.json'
+    HISTORY_FILENAME = '.ai_image_history.json'
+    
+    # Provider configurations
+    PROVIDERS = {
+        'openai': {
+            'name': 'OpenAI DALL-E',
+            'generate_url': 'https://api.openai.com/v1/images/generations',
+            'edit_url': 'https://api.openai.com/v1/images/edits',
+            'variation_url': 'https://api.openai.com/v1/images/variations',
+            'env_key': 'OPENAI_API_KEY',
+            'config_key': 'openai_api_key',
+            'models': ['dall-e-3', 'dall-e-2', 'gpt-image-1'],
+            'sizes': ['1024x1024', '1024x1792', '1792x1024', '512x512', '256x256']
+        },
+        'stability': {
+            'name': 'Stability AI',
+            'generate_url': 'https://api.stability.ai/v1/generation/{engine}/text-to-image',
+            'img2img_url': 'https://api.stability.ai/v1/generation/{engine}/image-to-image',
+            'env_key': 'STABILITY_API_KEY',
+            'config_key': 'stability_api_key',
+            'models': ['stable-diffusion-xl-1024-v1-0', 'stable-diffusion-v1-6', 'stable-diffusion-xl-beta-v2-2-2'],
+            'sizes': ['1024x1024', '1152x896', '896x1152', '1216x832', '832x1216', '512x512']
+        },
+        'replicate': {
+            'name': 'Replicate',
+            'generate_url': 'https://api.replicate.com/v1/predictions',
+            'env_key': 'REPLICATE_API_TOKEN',
+            'config_key': 'replicate_api_key',
+            'models': ['stability-ai/sdxl', 'black-forest-labs/flux-schnell', 'black-forest-labs/flux-pro'],
+            'sizes': ['1024x1024', '1024x768', '768x1024', '512x512']
+        },
+        'local': {
+            'name': 'Local (Automatic1111/ComfyUI)',
+            'generate_url': 'http://127.0.0.1:7860/sdapi/v1/txt2img',
+            'img2img_url': 'http://127.0.0.1:7860/sdapi/v1/img2img',
+            'env_key': '',
+            'config_key': '',
+            'models': ['default'],
+            'sizes': ['1024x1024', '768x768', '512x512', '768x512', '512x768']
+        }
+    }
+    
+    # Preset configurations
+    PRESETS = {
+        'photorealistic': {
+            'style': 'natural',
+            'quality': 'hd',
+            'negative_prompt': 'cartoon, illustration, painting, drawing, art, anime'
+        },
+        'artistic': {
+            'style': 'vivid',
+            'quality': 'hd',
+            'negative_prompt': 'photo, realistic, photograph'
+        },
+        'quick_draft': {
+            'style': 'natural',
+            'quality': 'standard',
+            'negative_prompt': ''
+        },
+        'high_quality': {
+            'style': 'vivid',
+            'quality': 'hd',
+            'negative_prompt': 'low quality, blurry, distorted'
+        }
+    }
+    
+    def __init__(self):
+        super().__init__()
+        # Set config paths - extension directory for portability
+        self.extension_dir = os.path.dirname(os.path.abspath(__file__))
+        self.config_path = os.path.join(self.extension_dir, self.CONFIG_FILENAME)
+        self.history_path = os.path.join(self.extension_dir, self.HISTORY_FILENAME)
+        
+        # Load configuration on init
+        self._config = self.load_config()
+    
     def add_arguments(self, pars):
         pars.add_argument("--tab", type=str, default="mode", help="Active tab")
         pars.add_argument("--operation_mode", type=str, default="generate", help="Operation mode")
-        pars.add_argument("--api_key", type=str, default="", help="OpenAI API key")
+        
+        # Provider settings
+        pars.add_argument("--provider", type=str, default="openai", 
+            help="AI Provider: openai, stability, replicate, local")
+        pars.add_argument("--api_key", type=str, default="", help="API key (overrides config)")
+        pars.add_argument("--use_env_key", type=inkex.Boolean, default=False,
+            help="Use API key from environment variable")
+        pars.add_argument("--use_config_key", type=inkex.Boolean, default=True,
+            help="Use API key from config file")
+        pars.add_argument("--api_endpoint", type=str, default="",
+            help="Custom API endpoint for local/self-hosted models")
+        pars.add_argument("--save_api_key", type=inkex.Boolean, default=False,
+            help="Save provided API key to config file")
+        
+        # Proxy settings
+        pars.add_argument("--use_proxy", type=inkex.Boolean, default=False, help="Use proxy")
+        pars.add_argument("--proxy_url", type=str, default="", help="HTTP proxy URL")
+        
+        # Prompt settings
         pars.add_argument("--prompt", type=str, default="", help="Image description")
+        pars.add_argument("--negative_prompt", type=str, default="", 
+            help="What to avoid in generation")
         pars.add_argument("--edit_instruction", type=str, default="", help="Edit instruction")
+        
+        # Preset
+        pars.add_argument("--preset", type=str, default="", 
+            help="Load settings from preset: photorealistic, artistic, quick_draft, high_quality")
         
         # Image settings
         pars.add_argument("--model", type=str, default="dall-e-3", help="Model to use")
         pars.add_argument("--image_size", type=str, default="1024x1024", help="Image size")
+        pars.add_argument("--custom_width", type=int, default=1024, help="Custom width")
+        pars.add_argument("--custom_height", type=int, default=1024, help="Custom height")
+        pars.add_argument("--use_custom_size", type=inkex.Boolean, default=False, 
+            help="Use custom dimensions")
         pars.add_argument("--quality", type=str, default="standard", help="Image quality")
         pars.add_argument("--style", type=str, default="vivid", help="Image style")
+        
+        # Advanced generation options
+        pars.add_argument("--seed", type=int, default=-1, 
+            help="Random seed (-1 for random)")
+        pars.add_argument("--batch_count", type=int, default=1, 
+            help="Number of images to generate (1-4)")
+        pars.add_argument("--cfg_scale", type=float, default=7.0,
+            help="CFG scale for Stability/Local (1-20)")
+        pars.add_argument("--steps", type=int, default=30,
+            help="Sampling steps for Stability/Local")
+        
+        # Image-to-image options
+        pars.add_argument("--img2img_strength", type=float, default=0.75,
+            help="How much to transform source image (0-1)")
+        pars.add_argument("--use_selection_as_mask", type=inkex.Boolean, default=False,
+            help="Use selected shapes as edit mask")
         
         # Save options
         pars.add_argument("--save_to_disk", type=inkex.Boolean, default=True, help="Save to disk")
@@ -41,57 +168,286 @@ class AIImageGenerator(inkex.EffectExtension):
         # Placement options
         pars.add_argument("--position_mode", type=str, default="center", help="Position mode")
         pars.add_argument("--scale_mode", type=str, default="original", help="Scale mode")
-        pars.add_argument("--custom_width", type=int, default=800, help="Custom width")
-        pars.add_argument("--custom_height", type=int, default=600, help="Custom height")
+        pars.add_argument("--placement_width", type=int, default=800, help="Placement width")
+        pars.add_argument("--placement_height", type=int, default=600, help="Placement height")
         
         # Edit options
         pars.add_argument("--mask_mode", type=str, default="full", help="Mask mode for editing")
         pars.add_argument("--mask_opacity", type=float, default=0.5, help="Mask opacity")
+        pars.add_argument("--mask_feather", type=int, default=0, help="Mask feather radius")
+        
+        # History/Cache
+        pars.add_argument("--save_history", type=inkex.Boolean, default=True,
+            help="Save generation history")
+    
+    # ==================== Configuration Management ====================
+    
+    def load_config(self):
+        """Load configuration from JSON file."""
+        default_config = {
+            'openai_api_key': '',
+            'stability_api_key': '',
+            'replicate_api_key': '',
+            'default_provider': 'openai',
+            'default_model': 'dall-e-3',
+            'default_size': '1024x1024',
+            'default_quality': 'standard',
+            'default_save_directory': os.path.expanduser('~/Pictures/AI_Images')
+        }
+        
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    loaded_config = json.load(f)
+                    # Merge with defaults to ensure all keys exist
+                    default_config.update(loaded_config)
+            except Exception as e:
+                inkex.errormsg(f"Warning: Could not load config file: {e}")
+        
+        return default_config
+    
+    def save_config(self, config=None):
+        """Save configuration to JSON file."""
+        if config is None:
+            config = self._config
+        
+        try:
+            with open(self.config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4)
+        except Exception as e:
+            inkex.errormsg(f"Warning: Could not save config file: {e}")
+    
+    def get_config_value(self, key, default=None):
+        """Get a value from the configuration."""
+        return self._config.get(key, default)
+    
+    def set_config_value(self, key, value):
+        """Set a value in the configuration and save."""
+        self._config[key] = value
+        self.save_config()
+    
+    def get_api_key(self):
+        """
+        Get API key with priority:
+        1. Direct input (if provided and not placeholder)
+        2. Environment variable (if use_env_key is True)
+        3. Config file (if use_config_key is True)
+        """
+        provider = self.options.provider
+        
+        # Skip API key for local provider
+        if provider == 'local':
+            return ''
+        
+        # 1. Check direct input first
+        if self.options.api_key and self.options.api_key not in ['', 'sk-...', 'sk-your-key-here']:
+            # Save to config if requested
+            if self.options.save_api_key:
+                config_key = self.PROVIDERS.get(provider, {}).get('config_key', '')
+                if config_key:
+                    self.set_config_value(config_key, self.options.api_key)
+            return self.options.api_key
+        
+        # 2. Check environment variable
+        if self.options.use_env_key:
+            env_key = self.PROVIDERS.get(provider, {}).get('env_key', '')
+            if env_key:
+                env_value = os.environ.get(env_key, '')
+                if env_value:
+                    return env_value
+        
+        # 3. Check config file
+        if self.options.use_config_key:
+            config_key = self.PROVIDERS.get(provider, {}).get('config_key', '')
+            if config_key:
+                config_value = self.get_config_value(config_key, '')
+                if config_value and config_value not in ['sk-your-key-here', 'r8_your-token-here']:
+                    return config_value
+        
+        return ''
+    
+    def get_save_directory(self):
+        """Get save directory from options or config."""
+        if self.options.save_directory and self.options.save_directory.strip():
+            return self.options.save_directory
+        return self.get_config_value('default_save_directory', os.path.expanduser('~/Pictures/AI_Images'))
+    
+    # ==================== History Management ====================
+    
+    def load_history(self):
+        """Load generation history."""
+        if os.path.exists(self.history_path):
+            try:
+                with open(self.history_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                pass
+        return []
+    
+    def save_to_history(self, operation, prompt):
+        """Save operation to history file."""
+        history = self.load_history()
+        
+        history.append({
+            'timestamp': datetime.now().isoformat(),
+            'operation': operation,
+            'prompt': prompt,
+            'provider': self.options.provider,
+            'model': self.options.model,
+            'size': self.options.image_size,
+            'seed': self.options.seed if self.options.seed != -1 else 'random'
+        })
+        
+        # Keep only last 100 entries
+        history = history[-100:]
+        
+        try:
+            with open(self.history_path, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=2)
+        except:
+            pass
+    
+    # ==================== Main Effect ====================
     
     def effect(self):
         """Main effect function."""
-        # Validate API key
-        if not self.options.api_key or self.options.api_key == "sk-...":
-            inkex.errormsg("Please provide a valid OpenAI API key.")
+        # Apply preset if specified
+        self.apply_preset()
+        
+        # Apply config defaults if not overridden
+        self.apply_config_defaults()
+        
+        # Get API key (from input, env, or config)
+        api_key = self.get_api_key()
+        if not api_key and self.options.provider != 'local':
+            provider_info = self.PROVIDERS.get(self.options.provider, {})
+            inkex.errormsg(
+                f"No API key found for {provider_info.get('name', self.options.provider)}.\n\n"
+                f"You can provide an API key in one of these ways:\n"
+                f"1. Enter it directly in the API Key field\n"
+                f"2. Set environment variable: {provider_info.get('env_key', 'N/A')}\n"
+                f"3. Add it to the config file: {self.config_path}\n\n"
+                f"Config file format:\n"
+                f'{{\n'
+                f'    "{provider_info.get("config_key", "api_key")}": "your-api-key-here"\n'
+                f'}}'
+            )
             return
+        
+        # Store resolved API key
+        self._api_key = api_key
         
         # Handle different operation modes
         if self.options.operation_mode == "generate":
-            # Generate new image
-            if not self.options.prompt or len(self.options.prompt.strip()) < 3:
-                inkex.errormsg("Please provide a description for image generation.")
-                return
-            
-            image_url = self.generate_image()
-            if image_url:
-                self.add_image_to_document(image_url)
-        
+            self.handle_generate()
         elif self.options.operation_mode == "edit":
-            # Edit existing image
-            selected_image = self.get_selected_image()
-            if not selected_image:
-                inkex.errormsg("Please select an image to edit.")
-                return
-            
-            if not self.options.edit_instruction or len(self.options.edit_instruction.strip()) < 3:
-                inkex.errormsg("Please provide edit instructions.")
-                return
-            
-            # Use the proper DALL-E edit API with mask
-            image_url = self.edit_image(selected_image)
-            if image_url:
-                self.replace_image(selected_image['element'], image_url)
-        
+            self.handle_edit()
         elif self.options.operation_mode == "variation":
-            # Create variation
-            selected_image = self.get_selected_image()
-            if not selected_image:
-                inkex.errormsg("Please select an image to create a variation of.")
-                return
+            self.handle_variation()
+        elif self.options.operation_mode == "img2img":
+            self.handle_img2img()
+    
+    def apply_preset(self):
+        """Apply preset settings if specified."""
+        if self.options.preset and self.options.preset in self.PRESETS:
+            preset = self.PRESETS[self.options.preset]
+            if not self.options.style:
+                self.options.style = preset.get('style', 'vivid')
+            if not self.options.quality:
+                self.options.quality = preset.get('quality', 'standard')
+            if not self.options.negative_prompt:
+                self.options.negative_prompt = preset.get('negative_prompt', '')
+    
+    def apply_config_defaults(self):
+        """Apply defaults from config file if options not explicitly set."""
+        # Use config defaults for model if using default
+        if self.options.model == 'dall-e-3':
+            default_model = self.get_config_value('default_model', 'dall-e-3')
+            # Only override if provider matches
+            if self.options.provider == 'openai' and default_model.startswith('dall-e'):
+                self.options.model = default_model
+        
+        # Use config defaults for size
+        if self.options.image_size == '1024x1024':
+            self.options.image_size = self.get_config_value('default_size', '1024x1024')
+        
+        # Use config defaults for quality
+        if self.options.quality == 'standard':
+            self.options.quality = self.get_config_value('default_quality', 'standard')
+    
+    # ==================== Operation Handlers ====================
+    
+    def handle_generate(self):
+        """Handle image generation."""
+        if not self.options.prompt or len(self.options.prompt.strip()) < 3:
+            inkex.errormsg("Please provide a description for image generation.")
+            return
+        
+        # Generate images (batch support)
+        batch_count = max(1, min(4, self.options.batch_count))
+        
+        for i in range(batch_count):
+            image_data = self.generate_image()
+            if image_data:
+                # Offset position for batch images
+                offset = i * 50 if batch_count > 1 else 0
+                self.add_image_to_document(image_data, offset=offset)
+                
+                # Save to history
+                if self.options.save_history:
+                    self.save_to_history('generate', self.options.prompt)
+    
+    def handle_edit(self):
+        """Handle image editing."""
+        selected_image = self.get_selected_image()
+        if not selected_image:
+            inkex.errormsg("Please select an image to edit.")
+            return
+        
+        if not self.options.edit_instruction or len(self.options.edit_instruction.strip()) < 3:
+            inkex.errormsg("Please provide edit instructions.")
+            return
+        
+        image_data = self.edit_image(selected_image)
+        if image_data:
+            self.replace_image(selected_image['element'], image_data)
             
-            image_url = self.create_variation(selected_image)
-            if image_url:
-                self.add_image_to_document(image_url)
+            if self.options.save_history:
+                self.save_to_history('edit', self.options.edit_instruction)
+    
+    def handle_variation(self):
+        """Handle creating variations."""
+        selected_image = self.get_selected_image()
+        if not selected_image:
+            inkex.errormsg("Please select an image to create a variation of.")
+            return
+        
+        image_data = self.create_variation(selected_image)
+        if image_data:
+            self.add_image_to_document(image_data)
+            
+            if self.options.save_history:
+                self.save_to_history('variation', 'Created variation')
+    
+    def handle_img2img(self):
+        """Handle image-to-image transformation."""
+        selected_image = self.get_selected_image()
+        if not selected_image:
+            inkex.errormsg("Please select an image for img2img transformation.")
+            return
+        
+        if not self.options.prompt or len(self.options.prompt.strip()) < 3:
+            inkex.errormsg("Please provide a prompt for img2img transformation.")
+            return
+        
+        image_data = self.img2img(selected_image)
+        if image_data:
+            self.add_image_to_document(image_data)
+            
+            if self.options.save_history:
+                self.save_to_history('img2img', self.options.prompt)
+    
+    # ==================== Image Selection ====================
     
     def get_selected_image(self):
         """Get selected image element."""
@@ -105,7 +461,6 @@ class AIImageGenerator(inkex.EffectExtension):
                     'href': elem.get('xlink:href') or elem.get('href')
                 }
             
-            # Check if it's a group containing an image
             elif isinstance(elem, Group):
                 for child in elem:
                     if isinstance(child, Image):
@@ -116,22 +471,57 @@ class AIImageGenerator(inkex.EffectExtension):
         
         return None
     
+    def get_selected_shapes_as_mask(self):
+        """Get selected shapes to use as mask."""
+        if not self.options.use_selection_as_mask:
+            return None
+        
+        shapes = []
+        for elem in self.svg.selection:
+            if not isinstance(elem, Image):
+                shapes.append(elem)
+        
+        return shapes if shapes else None
+    
+    def get_image_size(self):
+        """Get image size, supporting custom dimensions."""
+        if self.options.use_custom_size:
+            return f"{self.options.custom_width}x{self.options.custom_height}"
+        return self.options.image_size
+    
+    # ==================== Image Generation ====================
+    
     def generate_image(self):
-        """Generate new image using DALL-E API."""
-        url = "https://api.openai.com/v1/images/generations"
+        """Generate new image using selected provider."""
+        provider = self.options.provider
+        
+        if provider == 'openai':
+            return self.generate_openai()
+        elif provider == 'stability':
+            return self.generate_stability()
+        elif provider == 'replicate':
+            return self.generate_replicate()
+        elif provider == 'local':
+            return self.generate_local()
+        else:
+            inkex.errormsg(f"Unknown provider: {provider}")
+            return None
+    
+    def generate_openai(self):
+        """Generate image using OpenAI DALL-E."""
+        url = self.PROVIDERS['openai']['generate_url']
         
         headers = {
             'Content-Type': 'application/json',
-            'Authorization': f'Bearer {self.options.api_key}'
+            'Authorization': f'Bearer {self._api_key}'
         }
         
-        # Build request data based on model
         data = {
             'model': self.options.model,
-            'prompt': self.options.prompt,
+            'prompt': self.build_prompt(),
             'n': 1,
-            'size': self.options.image_size,
-            'response_format': 'url'
+            'size': self.get_image_size(),
+            'response_format': 'b64_json'  # Get base64 directly
         }
         
         # Add DALL-E 3 specific parameters
@@ -139,54 +529,206 @@ class AIImageGenerator(inkex.EffectExtension):
             data['quality'] = self.options.quality
             data['style'] = self.options.style
         
-        return self.call_api(url, headers, data)
+        result = self.call_api(url, headers, data)
+        if result and 'data' in result and len(result['data']) > 0:
+            if 'b64_json' in result['data'][0]:
+                return base64.b64decode(result['data'][0]['b64_json'])
+            elif 'url' in result['data'][0]:
+                return self.download_image(result['data'][0]['url'])
+        return None
+    
+    def generate_stability(self):
+        """Generate image using Stability AI."""
+        engine = self.options.model or 'stable-diffusion-xl-1024-v1-0'
+        url = self.PROVIDERS['stability']['generate_url'].format(engine=engine)
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {self._api_key}',
+            'Accept': 'application/json'
+        }
+        
+        width, height = map(int, self.get_image_size().split('x'))
+        
+        data = {
+            'text_prompts': [
+                {'text': self.options.prompt, 'weight': 1.0}
+            ],
+            'cfg_scale': self.options.cfg_scale,
+            'steps': self.options.steps,
+            'width': width,
+            'height': height,
+            'samples': 1
+        }
+        
+        # Add negative prompt if provided
+        if self.options.negative_prompt:
+            data['text_prompts'].append({
+                'text': self.options.negative_prompt,
+                'weight': -1.0
+            })
+        
+        # Add seed if specified
+        if self.options.seed != -1:
+            data['seed'] = self.options.seed
+        
+        result = self.call_api(url, headers, data)
+        if result and 'artifacts' in result and len(result['artifacts']) > 0:
+            return base64.b64decode(result['artifacts'][0]['base64'])
+        return None
+    
+    def generate_replicate(self):
+        """Generate image using Replicate."""
+        url = self.PROVIDERS['replicate']['generate_url']
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Token {self._api_key}'
+        }
+        
+        width, height = map(int, self.get_image_size().split('x'))
+        
+        # Determine model version
+        model = self.options.model or 'stability-ai/sdxl'
+        
+        data = {
+            'version': self.get_replicate_version(model),
+            'input': {
+                'prompt': self.build_prompt(),
+                'width': width,
+                'height': height
+            }
+        }
+        
+        if self.options.negative_prompt:
+            data['input']['negative_prompt'] = self.options.negative_prompt
+        
+        if self.options.seed != -1:
+            data['input']['seed'] = self.options.seed
+        
+        # Start prediction
+        result = self.call_api(url, headers, data)
+        if not result or 'id' not in result:
+            return None
+        
+        # Poll for completion
+        prediction_id = result['id']
+        return self.poll_replicate(prediction_id)
+    
+    def get_replicate_version(self, model):
+        """Get Replicate model version."""
+        versions = {
+            'stability-ai/sdxl': 'da77bc59ee60423279fd632efb4795ab731d9e3ca9705ef3341091fb989b7eaf',
+            'black-forest-labs/flux-schnell': 'f2ab8a5bfe79f02f0789a146cf5e73d2a4ff2684a98c2b303d1e1ff3814271db',
+            'black-forest-labs/flux-pro': '4f6c0f2a74f7f5e43c6e2e3e3f0e8b6d2a4c8f0e2b4a6c8d0e2f4a6b8c0d2e4f6'
+        }
+        return versions.get(model, versions['stability-ai/sdxl'])
+    
+    def poll_replicate(self, prediction_id, max_attempts=60):
+        """Poll Replicate for prediction completion."""
+        url = f"https://api.replicate.com/v1/predictions/{prediction_id}"
+        
+        headers = {
+            'Authorization': f'Token {self._api_key}'
+        }
+        
+        for _ in range(max_attempts):
+            result = self.call_api_get(url, headers)
+            if not result:
+                return None
+            
+            status = result.get('status')
+            
+            if status == 'succeeded':
+                output = result.get('output')
+                if output:
+                    # Output is usually a list of URLs
+                    if isinstance(output, list) and len(output) > 0:
+                        return self.download_image(output[0])
+                    elif isinstance(output, str):
+                        return self.download_image(output)
+                return None
+            
+            elif status == 'failed':
+                error = result.get('error', 'Unknown error')
+                inkex.errormsg(f"Replicate prediction failed: {error}")
+                return None
+            
+            # Still processing, wait and retry
+            time.sleep(2)
+        
+        inkex.errormsg("Replicate prediction timed out")
+        return None
+    
+    def generate_local(self):
+        """Generate image using local Automatic1111/ComfyUI API."""
+        endpoint = self.options.api_endpoint or self.PROVIDERS['local']['generate_url']
+        
+        headers = {
+            'Content-Type': 'application/json'
+        }
+        
+        width, height = map(int, self.get_image_size().split('x'))
+        
+        data = {
+            'prompt': self.build_prompt(),
+            'negative_prompt': self.options.negative_prompt or '',
+            'width': width,
+            'height': height,
+            'steps': self.options.steps,
+            'cfg_scale': self.options.cfg_scale,
+            'sampler_name': 'DPM++ 2M Karras',
+            'batch_size': 1
+        }
+        
+        if self.options.seed != -1:
+            data['seed'] = self.options.seed
+        
+        result = self.call_api(endpoint, headers, data, use_ssl=False)
+        if result and 'images' in result and len(result['images']) > 0:
+            return base64.b64decode(result['images'][0])
+        return None
+    
+    def build_prompt(self):
+        """Build full prompt with any modifications."""
+        prompt = self.options.prompt
+        
+        # For providers that don't support negative prompts in API,
+        # we could append style hints to main prompt
+        if self.options.provider == 'openai' and self.options.negative_prompt:
+            # DALL-E doesn't support negative prompts directly
+            # But we can hint at what we don't want
+            prompt += f". Avoid: {self.options.negative_prompt}"
+        
+        return prompt
+    
+    # ==================== Image Editing ====================
     
     def convert_image_to_rgba(self, image_data):
         """Convert image to RGBA format required by DALL-E."""
         try:
             from PIL import Image as PILImage
             
-            # Load image
             img = PILImage.open(BytesIO(image_data))
             
-            # Convert to RGBA if not already
             if img.mode != 'RGBA':
-                # Handle different modes
-                if img.mode == 'RGB':
-                    # Add alpha channel
-                    img = img.convert('RGBA')
-                elif img.mode == 'L':
-                    # Grayscale to RGBA
-                    img = img.convert('RGBA')
-                elif img.mode == 'LA':
-                    # Grayscale with alpha to RGBA
-                    img = img.convert('RGBA')
-                elif img.mode == 'P':
-                    # Palette to RGBA
-                    img = img.convert('RGBA')
-                else:
-                    # Other modes
-                    img = img.convert('RGBA')
+                img = img.convert('RGBA')
             
-            # Ensure image is square and correct size for DALL-E
-            size = int(self.options.image_size.split('x')[0])
+            # Get target size
+            size_str = self.get_image_size()
+            size = int(size_str.split('x')[0])
             if size not in [256, 512, 1024]:
                 size = 1024
             
             if img.size != (size, size):
-                # Resize to square, maintaining aspect ratio with padding
                 img.thumbnail((size, size), PILImage.Resampling.LANCZOS)
                 
-                # Create new square image with transparent background
                 new_img = PILImage.new('RGBA', (size, size), (0, 0, 0, 0))
-                
-                # Paste resized image in center
                 x = (size - img.size[0]) // 2
                 y = (size - img.size[1]) // 2
                 new_img.paste(img, (x, y))
                 img = new_img
             
-            # Save to bytes
             output = BytesIO()
             img.save(output, format='PNG')
             return output.getvalue()
@@ -199,25 +741,17 @@ class AIImageGenerator(inkex.EffectExtension):
             return None
     
     def create_mask(self, image_data, mask_mode='full'):
-        """Create a mask for image editing.
-        
-        For DALL-E edit to work properly, the mask indicates transparent areas
-        that will be regenerated. Transparent areas = regenerate, Opaque = keep.
-        """
+        """Create a mask for image editing."""
         try:
-            from PIL import Image as PILImage, ImageDraw
+            from PIL import Image as PILImage, ImageDraw, ImageFilter
             
-            # Load original image to get size
             img = PILImage.open(BytesIO(image_data))
-            size = img.size[0]  # Should be square
+            size = img.size[0]
             
             if mask_mode == 'full':
-                # Full mask - regenerate entire image
-                # Create fully transparent mask
                 mask = PILImage.new('RGBA', (size, size), (0, 0, 0, 0))
             
             elif mask_mode == 'center':
-                # Center mask - keep edges, regenerate center
                 mask = PILImage.new('RGBA', (size, size), (0, 0, 0, 255))
                 draw = ImageDraw.Draw(mask)
                 margin = size // 4
@@ -227,7 +761,6 @@ class AIImageGenerator(inkex.EffectExtension):
                 )
             
             elif mask_mode == 'edges':
-                # Edge mask - keep center, regenerate edges
                 mask = PILImage.new('RGBA', (size, size), (0, 0, 0, 0))
                 draw = ImageDraw.Draw(mask)
                 margin = size // 4
@@ -236,11 +769,36 @@ class AIImageGenerator(inkex.EffectExtension):
                     fill=(0, 0, 0, 255)
                 )
             
+            elif mask_mode == 'top_half':
+                mask = PILImage.new('RGBA', (size, size), (0, 0, 0, 255))
+                draw = ImageDraw.Draw(mask)
+                draw.rectangle([0, 0, size, size // 2], fill=(0, 0, 0, 0))
+            
+            elif mask_mode == 'bottom_half':
+                mask = PILImage.new('RGBA', (size, size), (0, 0, 0, 255))
+                draw = ImageDraw.Draw(mask)
+                draw.rectangle([0, size // 2, size, size], fill=(0, 0, 0, 0))
+            
+            elif mask_mode == 'left_half':
+                mask = PILImage.new('RGBA', (size, size), (0, 0, 0, 255))
+                draw = ImageDraw.Draw(mask)
+                draw.rectangle([0, 0, size // 2, size], fill=(0, 0, 0, 0))
+            
+            elif mask_mode == 'right_half':
+                mask = PILImage.new('RGBA', (size, size), (0, 0, 0, 255))
+                draw = ImageDraw.Draw(mask)
+                draw.rectangle([size // 2, 0, size, size], fill=(0, 0, 0, 0))
+            
             else:
-                # Default to full mask
                 mask = PILImage.new('RGBA', (size, size), (0, 0, 0, 0))
             
-            # Save mask to bytes
+            # Apply feathering if specified
+            if self.options.mask_feather > 0:
+                # Convert to grayscale for blur, then back
+                alpha = mask.split()[3]
+                alpha = alpha.filter(ImageFilter.GaussianBlur(self.options.mask_feather))
+                mask.putalpha(alpha)
+            
             output = BytesIO()
             mask.save(output, format='PNG')
             return output.getvalue()
@@ -252,70 +810,105 @@ class AIImageGenerator(inkex.EffectExtension):
             inkex.errormsg(f"Error creating mask: {str(e)}")
             return None
     
+    def create_mask_from_shapes(self, image_data, shapes):
+        """Create mask from selected Inkscape shapes."""
+        try:
+            from PIL import Image as PILImage, ImageDraw
+            
+            img = PILImage.open(BytesIO(image_data))
+            size = img.size[0]
+            
+            # Create opaque mask (keep everything by default)
+            mask = PILImage.new('RGBA', (size, size), (0, 0, 0, 255))
+            draw = ImageDraw.Draw(mask)
+            
+            for shape in shapes:
+                bbox = shape.bounding_box()
+                if bbox:
+                    # Convert to mask coordinates (simplified)
+                    x1 = int(bbox.left * size / self.svg.viewport_width)
+                    y1 = int(bbox.top * size / self.svg.viewport_height)
+                    x2 = int(bbox.right * size / self.svg.viewport_width)
+                    y2 = int(bbox.bottom * size / self.svg.viewport_height)
+                    
+                    # Make this area transparent (to be regenerated)
+                    draw.rectangle([x1, y1, x2, y2], fill=(0, 0, 0, 0))
+            
+            output = BytesIO()
+            mask.save(output, format='PNG')
+            return output.getvalue()
+            
+        except Exception as e:
+            inkex.errormsg(f"Error creating mask from shapes: {str(e)}")
+            return None
+    
     def edit_image(self, selected_image):
-        """Edit existing image using DALL-E API.
-        
-        Note: DALL-E edit requires a mask. This implementation creates
-        a mask based on the mask_mode setting.
-        """
-        # Get image data
+        """Edit existing image."""
         image_data = self.get_image_data(selected_image['href'])
         if not image_data:
             inkex.errormsg("Could not load image data for editing.")
             return None
         
-        # Convert image to RGBA format
         image_data = self.convert_image_to_rgba(image_data)
         if not image_data:
             return None
         
-        # Create mask
-        mask_data = self.create_mask(image_data, self.options.mask_mode)
+        # Create mask - either from shapes or from mask_mode
+        shapes = self.get_selected_shapes_as_mask()
+        if shapes:
+            mask_data = self.create_mask_from_shapes(image_data, shapes)
+        else:
+            mask_data = self.create_mask(image_data, self.options.mask_mode)
+        
         if not mask_data:
             return None
         
-        # DALL-E 2 only supports image editing
-        url = "https://api.openai.com/v1/images/edits"
+        if self.options.provider == 'openai':
+            return self.edit_openai(image_data, mask_data)
+        elif self.options.provider == 'stability':
+            return self.edit_stability(image_data, mask_data)
+        elif self.options.provider == 'local':
+            return self.edit_local(image_data, mask_data)
+        else:
+            inkex.errormsg(f"Edit not supported for provider: {self.options.provider}")
+            return None
+    
+    def edit_openai(self, image_data, mask_data):
+        """Edit image using OpenAI API."""
+        url = self.PROVIDERS['openai']['edit_url']
         
         headers = {
-            'Authorization': f'Bearer {self.options.api_key}'
+            'Authorization': f'Bearer {self._api_key}'
         }
         
-        # Create multipart form data
         boundary = '----WebKitFormBoundary' + os.urandom(16).hex()
         headers['Content-Type'] = f'multipart/form-data; boundary={boundary}'
         
-        # Build multipart body
         body_parts = []
         
-        # Add image file
         body_parts.append(f'--{boundary}'.encode())
         body_parts.append(b'Content-Disposition: form-data; name="image"; filename="image.png"')
         body_parts.append(b'Content-Type: image/png')
         body_parts.append(b'')
         body_parts.append(image_data)
         
-        # Add mask file
         body_parts.append(f'--{boundary}'.encode())
         body_parts.append(b'Content-Disposition: form-data; name="mask"; filename="mask.png"')
         body_parts.append(b'Content-Type: image/png')
         body_parts.append(b'')
         body_parts.append(mask_data)
         
-        # Add prompt (edit instruction)
         body_parts.append(f'--{boundary}'.encode())
         body_parts.append(b'Content-Disposition: form-data; name="prompt"')
         body_parts.append(b'')
         body_parts.append(self.options.edit_instruction.encode())
         
-        # Add model (DALL-E 2 only)
         body_parts.append(f'--{boundary}'.encode())
         body_parts.append(b'Content-Disposition: form-data; name="model"')
         body_parts.append(b'')
         body_parts.append(b'dall-e-2')
         
-        # Add size (must be 256x256, 512x512, or 1024x1024)
-        size = self.options.image_size
+        size = self.get_image_size()
         if size not in ['256x256', '512x512', '1024x1024']:
             size = '1024x1024'
         body_parts.append(f'--{boundary}'.encode())
@@ -323,61 +916,275 @@ class AIImageGenerator(inkex.EffectExtension):
         body_parts.append(b'')
         body_parts.append(size.encode())
         
-        # Add n
         body_parts.append(f'--{boundary}'.encode())
-        body_parts.append(b'Content-Disposition: form-data; name="n"')
+        body_parts.append(b'Content-Disposition: form-data; name="response_format"')
         body_parts.append(b'')
-        body_parts.append(b'1')
+        body_parts.append(b'b64_json')
         
-        # Close boundary
         body_parts.append(f'--{boundary}--'.encode())
         body_parts.append(b'')
         
         body = b'\r\n'.join(body_parts)
         
-        return self.call_api_multipart(url, headers, body)
+        result = self.call_api_multipart(url, headers, body)
+        if result and 'data' in result and len(result['data']) > 0:
+            if 'b64_json' in result['data'][0]:
+                return base64.b64decode(result['data'][0]['b64_json'])
+            elif 'url' in result['data'][0]:
+                return self.download_image(result['data'][0]['url'])
+        return None
+    
+    def edit_stability(self, image_data, mask_data):
+        """Edit image using Stability AI inpainting."""
+        engine = 'stable-inpainting-512-v2-0'
+        url = f"https://api.stability.ai/v1/generation/{engine}/image-to-image/masking"
+        
+        headers = {
+            'Authorization': f'Bearer {self._api_key}',
+            'Accept': 'application/json'
+        }
+        
+        boundary = '----WebKitFormBoundary' + os.urandom(16).hex()
+        headers['Content-Type'] = f'multipart/form-data; boundary={boundary}'
+        
+        body_parts = []
+        
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="init_image"; filename="image.png"')
+        body_parts.append(b'Content-Type: image/png')
+        body_parts.append(b'')
+        body_parts.append(image_data)
+        
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="mask_image"; filename="mask.png"')
+        body_parts.append(b'Content-Type: image/png')
+        body_parts.append(b'')
+        body_parts.append(mask_data)
+        
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="text_prompts[0][text]"')
+        body_parts.append(b'')
+        body_parts.append(self.options.edit_instruction.encode())
+        
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="text_prompts[0][weight]"')
+        body_parts.append(b'')
+        body_parts.append(b'1.0')
+        
+        body_parts.append(f'--{boundary}--'.encode())
+        body_parts.append(b'')
+        
+        body = b'\r\n'.join(body_parts)
+        
+        result = self.call_api_multipart(url, headers, body)
+        if result and 'artifacts' in result and len(result['artifacts']) > 0:
+            return base64.b64decode(result['artifacts'][0]['base64'])
+        return None
+    
+    def edit_local(self, image_data, mask_data):
+        """Edit image using local API inpainting."""
+        endpoint = self.options.api_endpoint or 'http://127.0.0.1:7860/sdapi/v1/img2img'
+        
+        headers = {
+            'Content-Type': 'application/json'
+        }
+        
+        data = {
+            'init_images': [base64.b64encode(image_data).decode('utf-8')],
+            'mask': base64.b64encode(mask_data).decode('utf-8'),
+            'prompt': self.options.edit_instruction,
+            'negative_prompt': self.options.negative_prompt or '',
+            'denoising_strength': self.options.img2img_strength,
+            'steps': self.options.steps,
+            'cfg_scale': self.options.cfg_scale,
+            'inpainting_fill': 1,
+            'inpaint_full_res': True
+        }
+        
+        if self.options.seed != -1:
+            data['seed'] = self.options.seed
+        
+        result = self.call_api(endpoint, headers, data, use_ssl=False)
+        if result and 'images' in result and len(result['images']) > 0:
+            return base64.b64decode(result['images'][0])
+        return None
+    
+    # ==================== Image-to-Image ====================
+    
+    def img2img(self, selected_image):
+        """Transform image using img2img."""
+        image_data = self.get_image_data(selected_image['href'])
+        if not image_data:
+            inkex.errormsg("Could not load image data.")
+            return None
+        
+        image_data = self.convert_image_to_rgba(image_data)
+        if not image_data:
+            return None
+        
+        if self.options.provider == 'stability':
+            return self.img2img_stability(image_data)
+        elif self.options.provider == 'local':
+            return self.img2img_local(image_data)
+        else:
+            inkex.errormsg(f"img2img not supported for provider: {self.options.provider}")
+            return None
+    
+    def img2img_stability(self, image_data):
+        """Image-to-image using Stability AI."""
+        engine = self.options.model or 'stable-diffusion-xl-1024-v1-0'
+        url = self.PROVIDERS['stability']['img2img_url'].format(engine=engine)
+        
+        headers = {
+            'Authorization': f'Bearer {self._api_key}',
+            'Accept': 'application/json'
+        }
+        
+        boundary = '----WebKitFormBoundary' + os.urandom(16).hex()
+        headers['Content-Type'] = f'multipart/form-data; boundary={boundary}'
+        
+        body_parts = []
+        
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="init_image"; filename="image.png"')
+        body_parts.append(b'Content-Type: image/png')
+        body_parts.append(b'')
+        body_parts.append(image_data)
+        
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="init_image_mode"')
+        body_parts.append(b'')
+        body_parts.append(b'IMAGE_STRENGTH')
+        
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="image_strength"')
+        body_parts.append(b'')
+        body_parts.append(str(1 - self.options.img2img_strength).encode())
+        
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="text_prompts[0][text]"')
+        body_parts.append(b'')
+        body_parts.append(self.options.prompt.encode())
+        
+        if self.options.negative_prompt:
+            body_parts.append(f'--{boundary}'.encode())
+            body_parts.append(b'Content-Disposition: form-data; name="text_prompts[1][text]"')
+            body_parts.append(b'')
+            body_parts.append(self.options.negative_prompt.encode())
+            
+            body_parts.append(f'--{boundary}'.encode())
+            body_parts.append(b'Content-Disposition: form-data; name="text_prompts[1][weight]"')
+            body_parts.append(b'')
+            body_parts.append(b'-1.0')
+        
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="cfg_scale"')
+        body_parts.append(b'')
+        body_parts.append(str(self.options.cfg_scale).encode())
+        
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="steps"')
+        body_parts.append(b'')
+        body_parts.append(str(self.options.steps).encode())
+        
+        if self.options.seed != -1:
+            body_parts.append(f'--{boundary}'.encode())
+            body_parts.append(b'Content-Disposition: form-data; name="seed"')
+            body_parts.append(b'')
+            body_parts.append(str(self.options.seed).encode())
+        
+        body_parts.append(f'--{boundary}--'.encode())
+        body_parts.append(b'')
+        
+        body = b'\r\n'.join(body_parts)
+        
+        result = self.call_api_multipart(url, headers, body)
+        if result and 'artifacts' in result and len(result['artifacts']) > 0:
+            return base64.b64decode(result['artifacts'][0]['base64'])
+        return None
+    
+    def img2img_local(self, image_data):
+        """Image-to-image using local API."""
+        endpoint = self.options.api_endpoint or 'http://127.0.0.1:7860/sdapi/v1/img2img'
+        
+        headers = {
+            'Content-Type': 'application/json'
+        }
+        
+        width, height = map(int, self.get_image_size().split('x'))
+        
+        data = {
+            'init_images': [base64.b64encode(image_data).decode('utf-8')],
+            'prompt': self.options.prompt,
+            'negative_prompt': self.options.negative_prompt or '',
+            'denoising_strength': self.options.img2img_strength,
+            'width': width,
+            'height': height,
+            'steps': self.options.steps,
+            'cfg_scale': self.options.cfg_scale
+        }
+        
+        if self.options.seed != -1:
+            data['seed'] = self.options.seed
+        
+        result = self.call_api(endpoint, headers, data, use_ssl=False)
+        if result and 'images' in result and len(result['images']) > 0:
+            return base64.b64decode(result['images'][0])
+        return None
+    
+    # ==================== Variations ====================
     
     def create_variation(self, selected_image):
-        """Create variation of existing image using DALL-E API."""
-        # Get image data
+        """Create variation of existing image."""
         image_data = self.get_image_data(selected_image['href'])
         if not image_data:
             inkex.errormsg("Could not load image data for variation.")
             return None
         
-        # Convert image to RGBA format
         image_data = self.convert_image_to_rgba(image_data)
         if not image_data:
             return None
         
-        url = "https://api.openai.com/v1/images/variations"
+        if self.options.provider == 'openai':
+            return self.variation_openai(image_data)
+        else:
+            # For other providers, use img2img with low strength
+            self.options.img2img_strength = 0.3
+            self.options.prompt = "same image with slight variations"
+            
+            if self.options.provider == 'stability':
+                return self.img2img_stability(image_data)
+            elif self.options.provider == 'local':
+                return self.img2img_local(image_data)
+        
+        inkex.errormsg(f"Variation not supported for provider: {self.options.provider}")
+        return None
+    
+    def variation_openai(self, image_data):
+        """Create variation using OpenAI API."""
+        url = self.PROVIDERS['openai']['variation_url']
         
         headers = {
-            'Authorization': f'Bearer {self.options.api_key}'
+            'Authorization': f'Bearer {self._api_key}'
         }
         
-        # Create multipart form data
         boundary = '----WebKitFormBoundary' + os.urandom(16).hex()
         headers['Content-Type'] = f'multipart/form-data; boundary={boundary}'
         
-        # Build multipart body
         body_parts = []
         
-        # Add image file
         body_parts.append(f'--{boundary}'.encode())
         body_parts.append(b'Content-Disposition: form-data; name="image"; filename="image.png"')
         body_parts.append(b'Content-Type: image/png')
         body_parts.append(b'')
         body_parts.append(image_data)
         
-        # Add model
         body_parts.append(f'--{boundary}'.encode())
         body_parts.append(b'Content-Disposition: form-data; name="model"')
         body_parts.append(b'')
         body_parts.append(b'dall-e-2')
         
-        # Add size (must be 256x256, 512x512, or 1024x1024)
-        size = self.options.image_size
+        size = self.get_image_size()
         if size not in ['256x256', '512x512', '1024x1024']:
             size = '1024x1024'
         body_parts.append(f'--{boundary}'.encode())
@@ -385,22 +1192,36 @@ class AIImageGenerator(inkex.EffectExtension):
         body_parts.append(b'')
         body_parts.append(size.encode())
         
-        # Add n
         body_parts.append(f'--{boundary}'.encode())
-        body_parts.append(b'Content-Disposition: form-data; name="n"')
+        body_parts.append(b'Content-Disposition: form-data; name="response_format"')
         body_parts.append(b'')
-        body_parts.append(b'1')
+        body_parts.append(b'b64_json')
         
-        # Close boundary
         body_parts.append(f'--{boundary}--'.encode())
         body_parts.append(b'')
         
         body = b'\r\n'.join(body_parts)
         
-        return self.call_api_multipart(url, headers, body)
+        result = self.call_api_multipart(url, headers, body)
+        if result and 'data' in result and len(result['data']) > 0:
+            if 'b64_json' in result['data'][0]:
+                return base64.b64decode(result['data'][0]['b64_json'])
+            elif 'url' in result['data'][0]:
+                return self.download_image(result['data'][0]['url'])
+        return None
     
-    def call_api(self, url, headers, data):
-        """Call OpenAI API with JSON data."""
+    # ==================== API Calls ====================
+    
+    def get_ssl_context(self):
+        """Get proper SSL context."""
+        try:
+            context = ssl.create_default_context(cafile=certifi.where())
+            return context
+        except:
+            return ssl.create_default_context()
+    
+    def call_api(self, url, headers, data, use_ssl=True):
+        """Call API with JSON data and retry logic."""
         req = urllib.request.Request(
             url,
             data=json.dumps(data).encode('utf-8'),
@@ -408,33 +1229,77 @@ class AIImageGenerator(inkex.EffectExtension):
             method='POST'
         )
         
-        context = ssl._create_unverified_context()
+        context = self.get_ssl_context() if use_ssl else None
+        
+        # Setup proxy if configured
+        if self.options.use_proxy and self.options.proxy_url:
+            proxy_handler = urllib.request.ProxyHandler({
+                'http': self.options.proxy_url,
+                'https': self.options.proxy_url
+            })
+            if context:
+                https_handler = urllib.request.HTTPSHandler(context=context)
+                opener = urllib.request.build_opener(proxy_handler, https_handler)
+            else:
+                opener = urllib.request.build_opener(proxy_handler)
+        else:
+            if context:
+                https_handler = urllib.request.HTTPSHandler(context=context)
+                opener = urllib.request.build_opener(https_handler)
+            else:
+                opener = urllib.request.build_opener()
+        
+        # Retry logic with exponential backoff
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with opener.open(req, timeout=180) as response:
+                    return json.loads(response.read().decode('utf-8'))
+            
+            except urllib.error.HTTPError as e:
+                error_body = e.read().decode('utf-8')
+                try:
+                    error_data = json.loads(error_body)
+                    error_message = error_data.get('error', {}).get('message', str(e))
+                except:
+                    error_message = str(e)
+                
+                # Check if retryable
+                if e.code in [429, 500, 502, 503, 504] and attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) * 2
+                    time.sleep(wait_time)
+                    continue
+                
+                inkex.errormsg(f"API Error: {error_message}")
+                return None
+            
+            except urllib.error.URLError as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                inkex.errormsg(f"Connection Error: {str(e)}")
+                return None
+            
+            except Exception as e:
+                inkex.errormsg(f"Error: {str(e)}")
+                return None
+        
+        return None
+    
+    def call_api_get(self, url, headers):
+        """Call API with GET request."""
+        req = urllib.request.Request(url, headers=headers, method='GET')
+        
+        context = self.get_ssl_context()
         
         try:
-            with urllib.request.urlopen(req, timeout=120, context=context) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                
-                if 'data' in result and len(result['data']) > 0:
-                    return result['data'][0]['url']
-                else:
-                    raise Exception("No image URL in response")
-        
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8')
-            try:
-                error_data = json.loads(error_body)
-                error_message = error_data.get('error', {}).get('message', str(e))
-            except:
-                error_message = str(e)
-            inkex.errormsg(f"API Error: {error_message}")
-            return None
-        
+            with urllib.request.urlopen(req, timeout=60, context=context) as response:
+                return json.loads(response.read().decode('utf-8'))
         except Exception as e:
-            inkex.errormsg(f"Error: {str(e)}")
             return None
     
     def call_api_multipart(self, url, headers, body):
-        """Call OpenAI API with multipart form data."""
+        """Call API with multipart form data and retry logic."""
         req = urllib.request.Request(
             url,
             data=body,
@@ -442,42 +1307,50 @@ class AIImageGenerator(inkex.EffectExtension):
             method='POST'
         )
         
-        context = ssl._create_unverified_context()
+        context = self.get_ssl_context()
         
-        try:
-            with urllib.request.urlopen(req, timeout=120, context=context) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                
-                if 'data' in result and len(result['data']) > 0:
-                    return result['data'][0]['url']
-                else:
-                    raise Exception("No image URL in response")
-        
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8')
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
-                error_data = json.loads(error_body)
-                error_message = error_data.get('error', {}).get('message', str(e))
-            except:
-                error_message = str(e)
-            inkex.errormsg(f"API Error: {error_message}")
-            return None
+                with urllib.request.urlopen(req, timeout=180, context=context) as response:
+                    return json.loads(response.read().decode('utf-8'))
+            
+            except urllib.error.HTTPError as e:
+                error_body = e.read().decode('utf-8')
+                try:
+                    error_data = json.loads(error_body)
+                    error_message = error_data.get('error', {}).get('message', str(e))
+                except:
+                    error_message = str(e)
+                
+                if e.code in [429, 500, 502, 503, 504] and attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) * 2
+                    time.sleep(wait_time)
+                    continue
+                
+                inkex.errormsg(f"API Error: {error_message}")
+                return None
+            
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                inkex.errormsg(f"Error: {str(e)}")
+                return None
         
-        except Exception as e:
-            inkex.errormsg(f"Error: {str(e)}")
-            return None
+        return None
+    
+    # ==================== Image Data Helpers ====================
     
     def get_image_data(self, href):
-        """Get image data from href (data URI or file path)."""
+        """Get image data from href."""
         if href.startswith('data:'):
-            # Extract base64 data
             try:
                 header, encoded = href.split(',', 1)
                 return base64.b64decode(encoded)
             except:
                 return None
         elif href.startswith('file://') or os.path.isabs(href):
-            # Read from file
             try:
                 file_path = href.replace('file://', '')
                 with open(file_path, 'rb') as f:
@@ -485,7 +1358,6 @@ class AIImageGenerator(inkex.EffectExtension):
             except:
                 return None
         else:
-            # Try as relative path
             try:
                 with open(href, 'rb') as f:
                     return f.read()
@@ -494,10 +1366,10 @@ class AIImageGenerator(inkex.EffectExtension):
     
     def download_image(self, image_url):
         """Download image from URL."""
-        context = ssl._create_unverified_context()
+        context = self.get_ssl_context()
         
         try:
-            with urllib.request.urlopen(image_url, context=context) as response:
+            with urllib.request.urlopen(image_url, timeout=60, context=context) as response:
                 return response.read()
         except Exception as e:
             inkex.errormsg(f"Error downloading image: {str(e)}")
@@ -508,10 +1380,7 @@ class AIImageGenerator(inkex.EffectExtension):
         if not self.options.save_to_disk:
             return None
         
-        # Create directory if it doesn't exist
-        save_dir = self.options.save_directory
-        if not save_dir or save_dir.strip() == '':
-            save_dir = os.path.expanduser('~')
+        save_dir = self.get_save_directory()
         
         try:
             os.makedirs(save_dir, exist_ok=True)
@@ -519,12 +1388,11 @@ class AIImageGenerator(inkex.EffectExtension):
             inkex.errormsg(f"Could not create directory: {save_dir}")
             return None
         
-        # Generate filename with timestamp
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"{self.options.filename_prefix}_{timestamp}.png"
+        seed_str = f"_seed{self.options.seed}" if self.options.seed != -1 else ""
+        filename = f"{self.options.filename_prefix}_{timestamp}{seed_str}.png"
         filepath = os.path.join(save_dir, filename)
         
-        # Save image
         try:
             with open(filepath, 'wb') as f:
                 f.write(image_data)
@@ -533,72 +1401,56 @@ class AIImageGenerator(inkex.EffectExtension):
             inkex.errormsg(f"Error saving image: {str(e)}")
             return None
     
-    def add_image_to_document(self, image_url):
+    # ==================== Document Manipulation ====================
+    
+    def add_image_to_document(self, image_data, offset=0):
         """Add image to document."""
-        # Download image
-        image_data = self.download_image(image_url)
-        if not image_data:
-            return
+        if isinstance(image_data, str):
+            image_data = self.download_image(image_data)
+            if not image_data:
+                return
         
-        # Save to disk if requested
         saved_path = self.save_image_to_disk(image_data)
         
-        # Create image element
         image_elem = Image()
         image_elem.set('id', self.svg.get_unique_id('ai-image'))
         
-        # Set image source
         if self.options.embed_in_svg:
-            # Embed as data URI
             encoded = base64.b64encode(image_data).decode('utf-8')
             image_elem.set('xlink:href', f'data:image/png;base64,{encoded}')
         elif saved_path:
-            # Link to file
             image_elem.set('xlink:href', saved_path)
-        else:
-            # Use URL (temporary)
-            image_elem.set('xlink:href', image_url)
         
-        # Calculate position and size
         position = self.calculate_position()
         size = self.calculate_size()
         
-        image_elem.set('x', str(position['x']))
-        image_elem.set('y', str(position['y']))
+        image_elem.set('x', str(position['x'] + offset))
+        image_elem.set('y', str(position['y'] + offset))
         image_elem.set('width', str(size['width']))
         image_elem.set('height', str(size['height']))
         
-        # Add to current layer
         self.svg.get_current_layer().append(image_elem)
     
-    def replace_image(self, image_elem, image_url):
+    def replace_image(self, image_elem, image_data):
         """Replace existing image with new one."""
-        # Download image
-        image_data = self.download_image(image_url)
-        if not image_data:
-            return
+        if isinstance(image_data, str):
+            image_data = self.download_image(image_data)
+            if not image_data:
+                return
         
-        # Save to disk if requested
         saved_path = self.save_image_to_disk(image_data)
         
-        # Update image source
         if self.options.embed_in_svg:
-            # Embed as data URI
             encoded = base64.b64encode(image_data).decode('utf-8')
             image_elem.set('xlink:href', f'data:image/png;base64,{encoded}')
         elif saved_path:
-            # Link to file
             image_elem.set('xlink:href', saved_path)
-        else:
-            # Use URL (temporary)
-            image_elem.set('xlink:href', image_url)
     
     def calculate_position(self):
         """Calculate position based on position mode."""
         doc_width = self.svg.viewport_width
         doc_height = self.svg.viewport_height
         
-        # Get image size for centering calculations
         size = self.calculate_size()
         
         positions = {
@@ -633,19 +1485,21 @@ class AIImageGenerator(inkex.EffectExtension):
             }
         }
         
-        # For cursor mode, try to use selected object position
         if self.options.position_mode == 'cursor' and self.svg.selection:
             for elem in self.svg.selection:
                 bbox = elem.bounding_box()
                 if bbox:
-                    return {'x': bbox.center_x - size['width']/2, 'y': bbox.center_y - size['height']/2}
+                    return {
+                        'x': bbox.center_x - size['width']/2,
+                        'y': bbox.center_y - size['height']/2
+                    }
         
         return positions.get(self.options.position_mode, positions['center'])
     
     def calculate_size(self):
         """Calculate image size based on scale mode."""
-        # Parse image size from option
-        width, height = map(int, self.options.image_size.split('x'))
+        size_str = self.get_image_size()
+        width, height = map(int, size_str.split('x'))
         
         doc_width = self.svg.viewport_width
         doc_height = self.svg.viewport_height
@@ -668,7 +1522,10 @@ class AIImageGenerator(inkex.EffectExtension):
             return {'width': width * scale, 'height': height * scale}
         
         elif self.options.scale_mode == 'custom':
-            return {'width': self.options.custom_width, 'height': self.options.custom_height}
+            return {
+                'width': self.options.placement_width,
+                'height': self.options.placement_height
+            }
         
         return {'width': width, 'height': height}
 
