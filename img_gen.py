@@ -25,8 +25,8 @@ class AIImageGenerator(inkex.EffectExtension):
     """Extension to generate and edit images using AI."""
     
     # Configuration file paths
-    CONFIG_FILENAME = '.config.json'
-    HISTORY_FILENAME = '.ai_image_history.json'
+    CONFIG_FILENAME = 'config.json'
+    HISTORY_FILENAME = 'ai_image_history.json'
     
     # Provider configurations
     PROVIDERS = {
