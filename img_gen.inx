@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- filepath: c:\Users\youve\AppData\Roaming\inkscape\extensions\image_maker\img_gen.inx -->
 <inkscape-extension xmlns="http://www.inkscape.org/namespace/inkscape/extension">
     <name>AI Image Generator</name>
     <id>org.inkscape.ai.image.generator</id>

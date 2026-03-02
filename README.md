@@ -1,3 +1,6 @@
+<div align="center">
+
+
 # AI Image Generator for Inkscape
 
 [![Inkscape](https://img.shields.io/badge/Inkscape-1.0+-blue.svg)](https://inkscape.org/)
@@ -7,6 +10,21 @@
 > **Generate and edit images using AI directly within Inkscape**
 
 A powerful Inkscape extension that integrates multiple AI image generation providers (OpenAI DALL-E, Stability AI, Replicate, and local models) to create, edit, and transform images without leaving your design workflow.
+
+</div>
+
+
+## 📺 Demo
+
+<div align="center">
+
+<!-- Replace VIDEO_ID with your actual YouTube video ID -->
+[![Watch the Demo](https://img.youtube.com/vi/bw5SQ3BXnKg/maxresdefault.jpg)](https://www.youtube.com/watch?v=bw5SQ3BXnKg)
+
+*Click to watch the full tutorial on YouTube*
+
+</div>
+
 
 ---
 
